@@ -37,9 +37,9 @@ class ProductExtractor:
         r'"price":\s*"?([\d,]+\.?\d*)"?',
         r'"originalPrice":\s*"?([\d,]+\.?\d*)"?',
         r'"salePrice":\s*"?([\d,]+\.?\d*)"?',
-        r'price["']?\s*[:=]\s*["']?([\d,]+\.?\d*)',
+        r"price[\"']?\s*[:=]\s*[\"']?([\d,]+\.?\d*)",
         r'[¥￥]\s*([\d,]+\.?\d+)',
-        r'price["']?\s*[:=]\s*([\d,]+\.?\d*)',
+        r"price[\"']?\s*[:=]\s*([\d,]+\.?\d*)",
     ]
 
     TITLE_PATTERNS = [
