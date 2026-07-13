@@ -62,9 +62,11 @@ class Settings(BaseSettings):
 
     @validator("admin_ids", pre=True)
     def parse_admin_ids(cls, v):
-        """Parse comma-separated admin IDs into list of integers."""
+        """Parse admin IDs into list of integers."""
         if isinstance(v, str):
             return [int(x.strip()) for x in v.split(",") if x.strip()]
+        if isinstance(v, (int, float)):
+            return [int(v)]
         return v
 
     @property
