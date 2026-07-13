@@ -67,6 +67,7 @@ logger = setup_logging()
 async def init_database():
     """Initialize database connection and schema."""
     logger.info("Initializing database...")
+    Path("data").mkdir(parents=True, exist_ok=True)
     await db.connect()
     await db.init_schema()
     logger.info("Database initialized successfully")
