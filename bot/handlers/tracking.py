@@ -35,7 +35,7 @@ async def menu_track(callback: CallbackQuery, lang: str = "en"):
     """Handle track menu button."""
     await callback.answer()
     await callback.message.edit_text(
-        "📦 Send /track <order_number> to check your order status.\n\n"
+        "📦 Send /track &lt;order_number&gt; to check your order status.\n\n"
         "Example: /track AFG-20240713-ABC123",
         reply_markup=main_menu_keyboard(lang)
     )
