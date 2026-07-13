@@ -146,6 +146,25 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "zh": "⛔ 您无权使用此功能。",
     },
 
+    "error_database": {
+        "en": "❌ Database error. Please try again later.",
+        "fa": "❌ خطای پایگاه داده. لطفاً بعداً دوباره تلاش کنید.",
+        "ps": "❌ د ډیټابیس تېروتنه. مهرباني وکړئ وروسته بیا هڅه وکړئ.",
+        "zh": "❌ 数据库错误。请稍后重试。",
+    },
+    "error_order_not_found": {
+        "en": "❌ Order not found. Please check the order number.",
+        "fa": "❌ سفارش یافت نشد. لطفاً شماره سفارش را بررسی کنید.",
+        "ps": "❌ امر ونه موندل شو. مهرباني وکړئ د امر شمیره وګورئ.",
+        "zh": "❌ 未找到订单。请检查订单号。",
+    },
+    "order_tracking_prompt": {
+        "en": "📦 Send /track &lt;order_number&gt; to check your order status.\n\nExample: /track AFG-20240713-ABC123",
+        "fa": "📦 برای بررسی وضعیت سفارش خود /track &lt;شماره_سفارش&gt; را ارسال کنید.\n\nمثال: /track AFG-20240713-ABC123",
+        "ps": "📦 د خپل امر حالت معلومولو لپاره /track &lt;د_امر_شمیره&gt; ولېږئ.\n\nبېلګه: /track AFG-20240713-ABC123",
+        "zh": "📦 发送 /track &lt;订单号&gt; 来查看订单状态。\n\n示例: /track AFG-20240713-ABC123",
+    },
+
     # ── Navigation ──
     "back": {
         "en": "◀️ Back",

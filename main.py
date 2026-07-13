@@ -28,7 +28,7 @@ from aiohttp import web
 from config import settings
 from bot.database import db
 from bot.handlers import all_routers
-from bot.middlewares import I18nMiddleware, AdminMiddleware
+from bot.middlewares import I18nMiddleware, AdminMiddleware, ErrorHandlerMiddleware
 
 
 # ── Logging Setup ──
@@ -85,7 +85,9 @@ def create_dispatcher() -> Dispatcher:
     """Create and configure the aiogram dispatcher."""
     dp = Dispatcher()
 
-    # Register middlewares
+    # Register middlewares (outermost first = runs first)
+    dp.message.middleware(ErrorHandlerMiddleware())
+    dp.callback_query.middleware(ErrorHandlerMiddleware())
     dp.message.middleware(I18nMiddleware())
     dp.callback_query.middleware(I18nMiddleware())
     dp.message.middleware(AdminMiddleware())

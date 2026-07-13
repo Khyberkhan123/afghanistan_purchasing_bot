@@ -4,6 +4,7 @@ Product link extraction, quantity selection, shipping, and order confirmation.
 """
 import re
 import secrets
+import logging
 from datetime import datetime, timedelta
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
@@ -22,6 +23,7 @@ from bot.utils.keyboards import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class OrderStates(StatesGroup):
@@ -36,8 +38,12 @@ class OrderStates(StatesGroup):
 # ── Product Link Handling ──
 
 URL_PATTERN = re.compile(
-    r"https?://(?:www\.)?(?:item\.taobao\.com|detail\.tmall\.com|"
-    r"mobile\.yangkeduo\.com|pinduoduo\.com|detail\.1688\.com|1688\.com)"
+    r"https?://(?:www\.)?"
+    r"(?:"
+    r"item\.taobao\.com|detail\.tmall\.com|taobao\.com/item|"
+    r"mobile\.yangkeduo\.com|yangkeduo\.com|pinduoduo\.com|"
+    r"detail\.1688\.com|1688\.com"
+    r")"
     r"[/\w\-\.?=&%]*", 
     re.IGNORECASE
 )
@@ -261,98 +267,119 @@ async def process_shipping(callback: CallbackQuery, state: FSMContext, lang: str
 @router.callback_query(F.data == "order:confirm", OrderStates.waiting_for_confirmation)
 async def confirm_order(callback: CallbackQuery, state: FSMContext, lang: str = "en"):
     """Handle order confirmation."""
-    data = await state.get_data()
-    user = callback.from_user
+    try:
+        data = await state.get_data()
+        user = callback.from_user
 
-    # Generate order number
-    order_number = f"AFG-{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
+        # Generate order number
+        order_number = f"AFG-{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
 
-    # Get user from DB
-    db_user = await db.get_user(user.id)
-    user_id = db_user["id"]
+        # Get user from DB
+        db_user = await db.get_user(user.id)
+        if not db_user:
+            await callback.answer("User not found. Send /start first.", show_alert=True)
+            await state.clear()
+            return
+        user_id = db_user["id"]
 
-    totals = data["order_totals"]
-    exchange_rate = data["exchange_rate"]
-    items = data["order_items"]
-    shipping_method = data["shipping_method"]
+        totals = data.get("order_totals")
+        exchange_rate = data.get("exchange_rate")
+        items = data.get("order_items", [])
+        shipping_method = data.get("shipping_method")
 
-    # Create order in database
-    order_id = await db.create_order(
-        user_id=user_id,
-        order_number=order_number,
-        status="pending",
-        shipping_method=shipping_method,
-        total_product_cny=totals["product_cost_cny"],
-        total_product_afn=totals["product_cost_afn"],
-        shipping_cost_cny=totals["shipping_cost_cny"],
-        shipping_cost_afn=totals["shipping_cost_afn"],
-        service_fee_cny=totals["service_fee_cny"],
-        service_fee_afn=totals["service_fee_afn"],
-        photo_inspection_fee_cny=totals["photo_inspection_cny"],
-        photo_inspection_fee_afn=totals["photo_inspection_afn"],
-        total_cny=totals["total_cny"],
-        total_afn=totals["total_afn"],
-        exchange_rate_used=exchange_rate,
-        payment_status="unpaid"
-    )
+        if not totals or not items or not shipping_method:
+            await callback.answer("Order data missing. Please start again.", show_alert=True)
+            await state.clear()
+            return
 
-    # Add order items
-    for item in items:
-        await db.add_order_item(
-            order_id=order_id,
-            product_url=item["url"],
-            product_title=item.get("title"),
-            quantity=item.get("quantity", 1),
-            unit_price_cny=item.get("price_cny"),
-            unit_price_afn=round(item["price_cny"] * exchange_rate, 2) if item.get("price_cny") else 0,
-            total_price_cny=item.get("total_price_cny", item.get("price_cny", 0)),
-            total_price_afn=round(item.get("total_price_cny", item.get("price_cny", 0)) * exchange_rate, 2),
-            weight_kg=item.get("weight_kg", 0.5),
-            photo_inspection=item.get("photo_inspection", False)
+        # Create order in database
+        order_id = await db.create_order(
+            user_id=user_id,
+            order_number=order_number,
+            status="pending",
+            shipping_method=shipping_method,
+            total_product_cny=totals["product_cost_cny"],
+            total_product_afn=totals["product_cost_afn"],
+            shipping_cost_cny=totals["shipping_cost_cny"],
+            shipping_cost_afn=totals["shipping_cost_afn"],
+            service_fee_cny=totals["service_fee_cny"],
+            service_fee_afn=totals["service_fee_afn"],
+            photo_inspection_fee_cny=totals["photo_inspection_cny"],
+            photo_inspection_fee_afn=totals["photo_inspection_afn"],
+            total_cny=totals["total_cny"],
+            total_afn=totals["total_afn"],
+            exchange_rate_used=exchange_rate,
+            payment_status="unpaid"
         )
 
-    # Update user stats
-    await db.update_user(
-        user.id,
-        total_orders=db_user["total_orders"] + 1,
-        total_spent=db_user["total_spent"] + totals["total_afn"]
-    )
+        # Add order items
+        for item in items:
+            await db.add_order_item(
+                order_id=order_id,
+                product_url=item.get("url", "manual://unknown"),
+                product_title=item.get("title"),
+                quantity=item.get("quantity", 1),
+                unit_price_cny=item.get("price_cny"),
+                unit_price_afn=round(item["price_cny"] * exchange_rate, 2) if item.get("price_cny") else 0,
+                total_price_cny=item.get("total_price_cny", item.get("price_cny", 0)),
+                total_price_afn=round(item.get("total_price_cny", item.get("price_cny", 0)) * exchange_rate, 2),
+                weight_kg=item.get("weight_kg", 0.5),
+                photo_inspection=item.get("photo_inspection", False)
+            )
 
-    # Check referral fulfillment
-    if db_user.get("referred_by"):
-        referrals = await db.fetchall(
-            "SELECT * FROM referrals WHERE referred_id = ? AND status = 'pending'",
-            (user_id,)
+        # Log initial status in history
+        await db.execute(
+            "INSERT INTO order_status_history (order_id, status) VALUES (?, ?)",
+            (order_id, "pending")
         )
-        for ref in referrals:
-            if totals["total_afn"] >= settings.referral_min_order_afn:
-                await db.fulfill_referral(
-                    ref["id"], order_id, settings.referral_reward_afn
-                )
 
-    await callback.answer()
+        # Update user stats
+        await db.update_user(
+            user.id,
+            total_orders=db_user["total_orders"] + 1,
+            total_spent=db_user["total_spent"] + totals["total_afn"]
+        )
 
-    # Show payment instructions
-    payment_text = get_text(
-        "payment_instructions", lang,
-        address=settings.office_address,
-        phone=settings.office_phone,
-        hours=settings.business_hours,
-        order_number=order_number,
-        amount_afn=totals["total_afn"]
-    )
+        # Check referral fulfillment
+        if db_user.get("referred_by"):
+            referrals = await db.fetchall(
+                "SELECT * FROM referrals WHERE referred_id = ? AND status = 'pending'",
+                (user_id,)
+            )
+            for ref in referrals:
+                if totals["total_afn"] >= settings.referral_min_order_afn:
+                    await db.fulfill_referral(
+                        ref["id"], order_id, settings.referral_reward_afn
+                    )
 
-    await callback.message.edit_text(payment_text)
+        await callback.answer()
 
-    # Send confirmation message
-    confirm_text = get_text(
-        "order_confirmed", lang,
-        order_number=order_number
-    )
-    await callback.message.answer(confirm_text)
+        # Show payment instructions
+        payment_text = get_text(
+            "payment_instructions", lang,
+            address=settings.office_address,
+            phone=settings.office_phone,
+            hours=settings.business_hours,
+            order_number=order_number,
+            amount_afn=totals["total_afn"]
+        )
 
-    # Clear state
-    await state.clear()
+        await callback.message.edit_text(payment_text)
+
+        # Send confirmation message
+        confirm_text = get_text(
+            "order_confirmed", lang,
+            order_number=order_number
+        )
+        await callback.message.answer(confirm_text)
+
+        # Clear state
+        await state.clear()
+
+    except Exception as e:
+        logger.exception("Order confirmation failed for user %s", user.id)
+        await callback.answer("❌ Failed to create order. Please try again.", show_alert=True)
+        await state.clear()
 
 
 @router.callback_query(F.data == "order:add_more", OrderStates.waiting_for_confirmation)
@@ -366,11 +393,35 @@ async def add_more_items(callback: CallbackQuery, state: FSMContext, lang: str =
     await state.set_state(OrderStates.waiting_for_link)
 
 
+@router.callback_query(F.data == "menu:new_order")
+async def menu_new_order(callback: CallbackQuery, state: FSMContext, lang: str = "en"):
+    """Handle new order from main menu."""
+    await callback.answer()
+    await callback.message.edit_text(
+        "🛒 Send me a product link from Taobao, Pinduoduo, or 1688.\n\n"
+        "Or enter details manually in format:\n"
+        "<b>Product Name | Price (CNY) | Weight (kg)</b>\n\n"
+        "Example: <i>iPhone Case | 25 | 0.3</i>"
+    )
+    await state.set_state(OrderStates.waiting_for_link)
+
+
 @router.callback_query(F.data == "order:cancel")
 async def cancel_order(callback: CallbackQuery, state: FSMContext, lang: str = "en"):
     """Cancel current order flow."""
     await state.clear()
     await callback.answer(get_text("cancel", lang))
+    await callback.message.edit_text(
+        get_text("welcome", lang, company_name=settings.company_name),
+        reply_markup=main_menu_keyboard(lang)
+    )
+
+
+@router.callback_query(F.data == "order:back")
+async def order_back(callback: CallbackQuery, state: FSMContext, lang: str = "en"):
+    """Go back to main menu."""
+    await state.clear()
+    await callback.answer()
     await callback.message.edit_text(
         get_text("welcome", lang, company_name=settings.company_name),
         reply_markup=main_menu_keyboard(lang)

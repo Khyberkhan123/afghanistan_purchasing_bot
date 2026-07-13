@@ -1,6 +1,8 @@
 """
 Order tracking and referral handlers.
 """
+import re
+import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -12,6 +14,7 @@ from bot.utils.i18n import get_text
 from bot.utils.keyboards import main_menu_keyboard
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 @router.message(Command("track"))
@@ -21,12 +24,22 @@ async def cmd_track(message: Message, lang: str = "en"):
 
     if len(args) < 2:
         await message.answer(
-            "📦 Please provide an order number.\n"
-            "Example: /track AFG-20240713-ABC123"
+            "📦 <b>Track Order</b>\n\n"
+            "Please provide an order number:\n"
+            "<code>/track AFG-YYYYMMDD-XXX</code>\n\n"
+            "You can find your order number in the confirmation message."
         )
         return
 
-    order_number = args[1]
+    order_number = args[1].strip()
+    if not re.match(r"^AFG-\d{8}-[A-Z0-9]+$", order_number):
+        await message.answer(
+            "❌ Invalid order number format.\n"
+            "Expected: <code>AFG-YYYYMMDD-XXX</code>\n"
+            "Example: <code>/track AFG-20240713-ABC123</code>"
+        )
+        return
+
     await show_tracking_info(message, order_number, lang)
 
 
@@ -35,55 +48,64 @@ async def menu_track(callback: CallbackQuery, lang: str = "en"):
     """Handle track menu button."""
     await callback.answer()
     await callback.message.edit_text(
-        "📦 Send /track &lt;order_number&gt; to check your order status.\n\n"
-        "Example: /track AFG-20240713-ABC123",
+        "📦 <b>Track Order</b>\n\n"
+        "Send the order number using:\n"
+        "<code>/track AFG-YYYYMMDD-XXX</code>\n\n"
+        "Example: <code>/track AFG-20240713-ABC123</code>",
         reply_markup=main_menu_keyboard(lang)
     )
 
 
 async def show_tracking_info(message_or_callback, order_number: str, lang: str):
     """Display tracking information for an order."""
-    order = await db.get_order(order_number=order_number)
+    try:
+        order = await db.get_order(order_number=order_number)
+    except Exception as e:
+        logger.exception("Database error fetching order %s", order_number)
+        err_text = "❌ Database error. Please try again later."
+        if isinstance(message_or_callback, Message):
+            await message_or_callback.answer(err_text)
+        else:
+            await message_or_callback.message.edit_text(err_text)
+        return
 
     if not order:
-        text = f"❌ Order #{order_number} not found. Please check the order number."
+        text = (
+            f"❌ Order <b>{order_number}</b> not found.\n\n"
+            "Double-check the order number or contact support."
+        )
         if isinstance(message_or_callback, Message):
             await message_or_callback.answer(text)
         else:
             await message_or_callback.message.edit_text(text)
         return
 
-    # Get status history
-    history = await db.fetchall(
-        "SELECT * FROM order_status_history WHERE order_id = ? ORDER BY created_at DESC",
-        (order["id"],)
-    )
+    try:
+        history = await db.fetchall(
+            "SELECT * FROM order_status_history WHERE order_id = ? ORDER BY created_at DESC",
+            (order["id"],)
+        )
+        items = await db.get_order_items(order["id"])
+    except Exception as e:
+        logger.exception("Database error for order %s", order_number)
+        err_text = "❌ Error loading order details."
+        if isinstance(message_or_callback, Message):
+            await message_or_callback.answer(err_text)
+        else:
+            await message_or_callback.message.edit_text(err_text)
+        return
 
-    # Get order items
-    items = await db.get_order_items(order["id"])
-
-    # Build tracking message
     status_emoji = {
-        "pending": "⏳",
-        "paid": "💳",
-        "purchased": "🛒",
-        "shipped": "📦",
-        "in_transit": "🚚",
-        "customs": "🛃",
-        "delivered": "📍",
-        "completed": "✅",
-        "cancelled": "❌",
+        "pending": "⏳", "paid": "💳", "purchased": "🛒",
+        "shipped": "📦", "in_transit": "🚚", "customs": "🛃",
+        "delivered": "📍", "completed": "✅", "cancelled": "❌",
     }
 
     status_display = {
-        "pending": "Pending Payment",
-        "paid": "Paid - Processing",
-        "purchased": "Purchased in China",
-        "shipped": "Shipped from China",
-        "in_transit": "In Transit",
-        "customs": "At Customs",
-        "delivered": "Delivered to Office",
-        "completed": "Completed",
+        "pending": "Pending Payment", "paid": "Paid - Processing",
+        "purchased": "Purchased in China", "shipped": "Shipped from China",
+        "in_transit": "In Transit", "customs": "At Customs",
+        "delivered": "Delivered to Office", "completed": "Completed",
         "cancelled": "Cancelled",
     }
 
@@ -92,29 +114,38 @@ async def show_tracking_info(message_or_callback, order_number: str, lang: str):
 
     items_text = ""
     for item in items:
-        items_text += f"• {item.get('product_title', 'Product')} x{item['quantity']}\n"
+        title = item.get("product_title", "Product") or "Product"
+        items_text += f"• {title} x{item['quantity']}\n"
+    if not items_text:
+        items_text = "  • (no items)\n"
 
     history_text = ""
     for h in history[:5]:
-        time_str = h["created_at"][:16] if isinstance(h["created_at"], str) else h["created_at"].strftime("%Y-%m-%d %H:%M")
-        history_text += f"  {status_emoji.get(h['status'], '•')} {status_display.get(h['status'], h['status'])} - {time_str}\n"
-
+        raw = h["created_at"]
+        if isinstance(raw, str):
+            time_str = raw[:16]
+        else:
+            time_str = raw.strftime("%Y-%m-%d %H:%M") if hasattr(raw, "strftime") else str(raw)
+        hs = h["status"]
+        history_text += f"  {status_emoji.get(hs, '•')} {status_display.get(hs, hs)} - {time_str}\n"
     if not history_text:
-        history_text = "  • Order created\n"
+        history_text = "  • Order placed\n"
 
-    tracking_text = f"""
-{emoji} <b>{get_text("tracking_header", lang, order_number=order_number)}</b>
+    created = order["created_at"]
+    if isinstance(created, str):
+        created_str = created[:10]
+    else:
+        created_str = created.strftime("%Y-%m-%d") if hasattr(created, "strftime") else str(created)
 
-📋 <b>Status:</b> {status_name}
-💰 <b>Total:</b> {order['total_afn']} AFN
-🚚 <b>Shipping:</b> {order.get('shipping_method', 'Not selected').upper()}
-📅 <b>Created:</b> {order['created_at'][:10] if isinstance(order['created_at'], str) else order['created_at'].strftime('%Y-%m-%d')}
-
-📦 <b>Items:</b>
-{items_text}
-📝 <b>Status History:</b>
-{history_text}
-    """
+    tracking_text = (
+        f"{emoji} <b>Order #{order_number}</b>\n\n"
+        f"📋 <b>Status:</b> {status_name}\n"
+        f"💰 <b>Total:</b> {order['total_afn']} AFN\n"
+        f"🚚 <b>Shipping:</b> {order.get('shipping_method', 'Not selected').upper()}\n"
+        f"📅 <b>Created:</b> {created_str}\n\n"
+        f"📦 <b>Items:</b>\n{items_text}\n"
+        f"📝 <b>Status History:</b>\n{history_text}"
+    )
 
     if isinstance(message_or_callback, Message):
         await message_or_callback.answer(tracking_text)

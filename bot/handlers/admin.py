@@ -378,6 +378,32 @@ async def process_broadcast(message: Message, is_admin: bool, state: FSMContext,
     await state.clear()
 
 
+@router.callback_query(F.data == "admin:users")
+async def admin_users(callback: CallbackQuery, is_admin: bool, lang: str = "en"):
+    """Show users list (admin only)."""
+    if not is_admin:
+        await callback.answer(get_text("not_authorized", lang), show_alert=True)
+        return
+
+    users = await db.fetchall(
+        "SELECT telegram_id, username, first_name, language, total_orders, total_spent, created_at "
+        "FROM users ORDER BY created_at DESC LIMIT 20"
+    )
+
+    if not users:
+        await callback.answer()
+        await callback.message.edit_text("No users found.", reply_markup=admin_panel_keyboard(lang))
+        return
+
+    text = "👥 <b>Recent Users</b>\n\n"
+    for u in users:
+        name = u.get("first_name") or u.get("username") or str(u["telegram_id"])
+        text += f"• {name} (@{u.get('username', 'N/A')}) | {u.get('language', 'en')} | {u.get('total_orders', 0)} orders | {u.get('total_spent', 0)} AFN\n"
+
+    await callback.answer()
+    await callback.message.edit_text(text, reply_markup=admin_panel_keyboard(lang))
+
+
 @router.callback_query(F.data == "admin:panel")
 async def back_to_admin(callback: CallbackQuery, is_admin: bool, lang: str = "en"):
     """Return to admin panel."""

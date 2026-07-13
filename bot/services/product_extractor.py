@@ -1,21 +1,14 @@
-"""
-Product extraction service for Chinese e-commerce platforms.
-Supports Taobao, Pinduoduo, and 1688 product link parsing.
-"""
 import re
+import json
 import httpx
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
-import asyncio
 
 from bot.database import ProductPlatform
 
 
 class ProductExtractor:
-    """Extracts product information from Chinese e-commerce URLs."""
-
-    # URL patterns for supported platforms
     PLATFORM_PATTERNS = {
         ProductPlatform.TAOBAO: [
             r"item\.taobao\.com",
@@ -25,6 +18,7 @@ class ProductExtractor:
         ProductPlatform.PINDUODUO: [
             r"mobile\.yangkeduo\.com",
             r"pinduoduo\.com",
+            r"yangkeduo\.com",
         ],
         ProductPlatform.ALIBABA1688: [
             r"detail\.1688\.com",
@@ -32,74 +26,188 @@ class ProductExtractor:
         ],
     }
 
-    # Price extraction patterns (fallback when scraping fails)
-    PRICE_PATTERNS = [
-        r'"price":\s*"?([\d,]+\.?\d*)"?',
-        r'"originalPrice":\s*"?([\d,]+\.?\d*)"?',
-        r'"salePrice":\s*"?([\d,]+\.?\d*)"?',
-        r"price[\"']?\s*[:=]\s*[\"']?([\d,]+\.?\d*)",
-        r'[¥￥]\s*([\d,]+\.?\d+)',
-        r"price[\"']?\s*[:=]\s*([\d,]+\.?\d*)",
-    ]
-
-    TITLE_PATTERNS = [
-        r'"title":\s*"([^"]+)"',
-        r'<title[^>]*>([^<]+)</title>',
-        r'"itemTitle":\s*"([^"]+)"',
-    ]
-
-    IMAGE_PATTERNS = [
-        r'"picUrl":\s*"([^"]+)"',
-        r'"image":\s*"([^"]+)"',
-        r'<img[^>]*src="([^"]+)"[^>]*class="[^"]*main[^"]*"',
-    ]
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
 
     def detect_platform(self, url: str) -> ProductPlatform:
-        """Detect which platform a URL belongs to."""
         url_lower = url.lower()
-
         for platform, patterns in self.PLATFORM_PATTERNS.items():
             for pattern in patterns:
                 if re.search(pattern, url_lower):
                     return platform
-
         return ProductPlatform.OTHER
 
-    def _extract_with_regex(self, html: str, patterns: list) -> Optional[str]:
-        """Extract value using regex patterns."""
-        for pattern in patterns:
-            match = re.search(pattern, html, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-        return None
-
     def _clean_price(self, price_str: str) -> Optional[float]:
-        """Clean and parse price string."""
         if not price_str:
             return None
-        # Remove currency symbols and commas
         cleaned = re.sub(r'[^\d.]', '', price_str)
         try:
             return float(cleaned) if cleaned else None
         except ValueError:
             return None
 
-    async def extract(self, url: str) -> Dict[str, Any]:
-        """
-        Extract product information from a URL.
+    def _extract_json_ld(self, soup: BeautifulSoup) -> Optional[Dict]:
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, list) and data:
+                    return data[0]
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return None
 
-        Returns dict with:
-        - url: original URL
-        - platform: detected platform
-        - title: product title
-        - price_cny: extracted price in CNY
-        - original_price_cny: original price if on sale
-        - image_url: product image URL
-        - description: short description
-        - weight_kg: estimated weight (default 0.5kg if unknown)
-        - status: extraction status
-        - error: error message if failed
-        """
+    def _extract_og_tags(self, soup: BeautifulSoup) -> Dict[str, Optional[str]]:
+        result = {}
+        for prop in ["title", "description", "image", "price:amount"]:
+            meta = soup.find("meta", property=lambda x: x and f"og:{prop}" in x.lower())
+            if meta:
+                result[prop] = meta.get("content")
+        for prop in ["twitter:title", "twitter:description", "twitter:image"]:
+            meta = soup.find("meta", property=lambda x: x and prop in x.lower())
+            if meta:
+                result[prop.split(":")[1]] = meta.get("content")
+        return result
+
+    def _extract_meta_tags(self, soup: BeautifulSoup) -> Dict[str, Optional[str]]:
+        result = {}
+        for name in ["description", "keywords"]:
+            meta = soup.find("meta", attrs={"name": name})
+            if meta:
+                result[name] = meta.get("content")
+        return result
+
+    def _extract_from_script_data(self, html: str) -> Dict[str, Any]:
+        result = {"title": None, "price_cny": None, "image_url": None}
+        patterns = [
+            r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
+            r'window\.__NUXT__\s*=\s*({.*?});',
+            r'window\.__DATA__\s*=\s*({.*?});',
+            r'window\.rawData\s*=\s*({.*?});',
+            r'var\s+data\s*=\s*({.*?});',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(1))
+                    items = data.get("item", data.get("goods", data.get("product", data.get("store", {}))))
+                    if isinstance(items, dict):
+                        result["title"] = items.get("title") or items.get("name") or items.get("itemName") or items.get("goodsName")
+                        price = items.get("price") or items.get("priceCny") or items.get("salePrice") or items.get("defaultPrice")
+                        if price:
+                            result["price_cny"] = self._clean_price(str(price))
+                        image = items.get("image") or items.get("picUrl") or items.get("imageUrl") or items.get("mainImage")
+                        if image:
+                            if isinstance(image, list):
+                                image = image[0] if image else None
+                            if image and isinstance(image, str):
+                                if image.startswith("//"):
+                                    image = "https:" + image
+                                result["image_url"] = image
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                if result["title"] or result["price_cny"]:
+                    break
+        return result
+
+    def _extract_title(self, soup: BeautifulSoup, og: Dict, script_data: Dict) -> Optional[str]:
+        if script_data.get("title"):
+            return script_data["title"]
+        if og.get("title"):
+            return og["title"]
+        title_tag = soup.find("title")
+        if title_tag and title_tag.string:
+            title = title_tag.string.strip()
+            title = re.sub(r'\s+', ' ', title)
+            for suffix in [" - Taobao", " - 淘宝", " - 拼多多", " - Pinduoduo", " - 1688.com", " | 淘宝", " | 拼多多"]:
+                if title.endswith(suffix):
+                    title = title[:-len(suffix)].strip()
+            return title
+        return None
+
+    def _extract_price(self, soup: BeautifulSoup, json_ld: Dict, og: Dict, script_data: Dict, html: str) -> Optional[float]:
+        if script_data.get("price_cny"):
+            return script_data["price_cny"]
+        if json_ld:
+            price = json_ld.get("offers", {}).get("price") or json_ld.get("price")
+            if price:
+                return self._clean_price(str(price))
+        if og.get("price:amount"):
+            return self._clean_price(og["price:amount"])
+        meta_price = soup.find("meta", attrs={"name": "price"})
+        if meta_price:
+            return self._clean_price(meta_price.get("content", ""))
+        patterns = [
+            r'"price":\s*"?([\d,]+\.?\d*)"?',
+            r'"salePrice":\s*"?([\d,]+\.?\d*)"?',
+            r'"currentPrice":\s*"?([\d,]+\.?\d*)"?',
+            r'[¥￥]\s*([\d,]+\.?\d+)',
+            r'"priceCny":\s*"?([\d,]+\.?\d*)"?',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                val = self._clean_price(match.group(1))
+                if val:
+                    return val
+        return None
+
+    def _extract_image(self, soup: BeautifulSoup, json_ld: Dict, og: Dict, script_data: Dict) -> Optional[str]:
+        if script_data.get("image_url"):
+            return script_data["image_url"]
+        if json_ld:
+            img = json_ld.get("image")
+            if isinstance(img, list):
+                img = img[0] if img else None
+            if img and isinstance(img, str):
+                return img if img.startswith("http") else "https:" + img
+        if og.get("image"):
+            img = og["image"]
+            if img.startswith("//"):
+                img = "https:" + img
+            return img
+        img_tag = soup.find("img", class_=re.compile(r"(main|primary|product|item|goods)", re.I))
+        if img_tag and img_tag.get("src"):
+            return img_tag["src"] if img_tag["src"].startswith("http") else None
+        img_tag = soup.find("img", attrs={"data-src": True})
+        if img_tag:
+            src = img_tag["data-src"]
+            if src.startswith("//"):
+                src = "https:" + src
+            return src if src.startswith("http") else None
+        return None
+
+    def _extract_weight(self, soup: BeautifulSoup, html: str) -> float:
+        patterns = [
+            r'(\d+(?:\.\d+)?)\s*(kg|千克|公斤)',
+            r'"weight"\s*[:=]\s*"?(\d+(?:\.\d+)?)"?',
+            r'"weightKg"\s*[:=]\s*"?(\d+(?:\.\d+)?)"?',
+            r'weight["\']?\s*:\s*(\d+(?:\.\d+)?)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                val = float(match.group(1))
+                if val > 0:
+                    return round(val, 3)
+        return 0.5
+
+    def get_platform_display_name(self, platform: ProductPlatform) -> str:
+        names = {
+            ProductPlatform.TAOBAO: "Taobao / Tmall",
+            ProductPlatform.PINDUODUO: "Pinduoduo",
+            ProductPlatform.ALIBABA1688: "1688 (Alibaba)",
+            ProductPlatform.OTHER: "Other Platform",
+        }
+        return names.get(platform, "Unknown")
+
+    async def extract(self, url: str) -> Dict[str, Any]:
         result = {
             "url": url,
             "platform": self.detect_platform(url).value,
@@ -108,75 +216,41 @@ class ProductExtractor:
             "original_price_cny": None,
             "image_url": None,
             "description": None,
-            "weight_kg": 0.5,  # Default estimate
+            "weight_kg": 0.5,
             "status": "pending",
             "error": None
         }
-
         try:
-            # Fetch the page
             async with httpx.AsyncClient(
-                timeout=15.0,
+                timeout=20.0,
                 follow_redirects=True,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                }
+                headers=self.HEADERS,
             ) as client:
                 response = await client.get(url)
-
                 if response.status_code != 200:
                     result["status"] = "failed"
                     result["error"] = f"HTTP {response.status_code}"
                     return result
-
                 html = response.text
-
-                # Extract title
-                title = self._extract_with_regex(html, self.TITLE_PATTERNS)
+                soup = BeautifulSoup(html, "lxml")
+                json_ld = self._extract_json_ld(soup)
+                og = self._extract_og_tags(soup)
+                meta = self._extract_meta_tags(soup)
+                script_data = self._extract_from_script_data(html)
+                title = self._extract_title(soup, og, script_data)
                 if title:
                     result["title"] = title
-
-                # Extract price
-                price = self._extract_with_regex(html, self.PRICE_PATTERNS)
+                price = self._extract_price(soup, json_ld, og, script_data, html)
                 if price:
-                    result["price_cny"] = self._clean_price(price)
-
-                # Try to find original price (for sale items)
-                # Look for patterns suggesting a discount
-                original_match = re.search(r'"originalPrice":\s*"?([\d,]+\.?\d*)"?', html)
-                if original_match:
-                    result["original_price_cny"] = self._clean_price(original_match.group(1))
-
-                # Extract image
-                image = self._extract_with_regex(html, self.IMAGE_PATTERNS)
+                    result["price_cny"] = price
+                image = self._extract_image(soup, json_ld, og, script_data)
                 if image:
-                    # Make absolute URL if relative
-                    if image.startswith("//"):
-                        image = "https:" + image
-                    elif image.startswith("/"):
-                        parsed = urlparse(url)
-                        image = f"{parsed.scheme}://{parsed.netloc}{image}"
                     result["image_url"] = image
-
-                # Try to extract description from meta tags
-                soup = BeautifulSoup(html, "lxml")
-                meta_desc = soup.find("meta", attrs={"name": "description"})
-                if meta_desc:
-                    result["description"] = meta_desc.get("content", "")
-
-                # Try to find weight information
-                weight_match = re.search(r'(\d+(?:\.\d+)?)\s*(kg|g|kilogram)', html, re.IGNORECASE)
-                if weight_match:
-                    weight_val = float(weight_match.group(1))
-                    unit = weight_match.group(2).lower()
-                    if unit in ("g",):
-                        weight_val = weight_val / 1000
-                    result["weight_kg"] = round(weight_val, 3)
-
-                result["status"] = "success"
-
+                result["description"] = og.get("description") or meta.get("description", "")
+                result["weight_kg"] = self._extract_weight(soup, html)
+                result["status"] = "success" if (result["title"] or result["price_cny"]) else "failed"
+                if result["status"] == "failed":
+                    result["error"] = "Could not extract product details"
         except httpx.TimeoutException:
             result["status"] = "failed"
             result["error"] = "Request timeout - website took too long to respond"
@@ -186,19 +260,7 @@ class ProductExtractor:
         except Exception as e:
             result["status"] = "failed"
             result["error"] = f"Extraction error: {str(e)}"
-
         return result
 
-    def get_platform_display_name(self, platform: ProductPlatform) -> str:
-        """Get human-readable platform name."""
-        names = {
-            ProductPlatform.TAOBAO: "Taobao / Tmall",
-            ProductPlatform.PINDUODUO: "Pinduoduo",
-            ProductPlatform.ALIBABA1688: "1688 (Alibaba)",
-            ProductPlatform.OTHER: "Other Platform",
-        }
-        return names.get(platform, "Unknown")
 
-
-# Singleton instance
 product_extractor = ProductExtractor()
