@@ -11,6 +11,7 @@ Usage:
 """
 import asyncio
 import logging
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -150,22 +151,24 @@ async def run_polling():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # Start health check server (required for Render Web Service)
-    app = web.Application()
-    async def health_check(_):
-        return web.json_response({"status": "ok", "mode": "polling"})
-    app.router.add_get("/health", health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    await site.start()
-    logger.info("Health check server started on port 8080")
+    # Start health check HTTP server (required for Render Web Service port detection)
+    health_app = web.Application()
+    async def health_handle(_):
+        return web.Response(text="ok")
+    health_app.router.add_get("/health", health_handle)
+    health_app.router.add_get("/", health_handle)
+    health_runner = web.AppRunner(health_app)
+    await health_runner.setup()
+    port = int(os.environ.get("PORT", "8080"))
+    health_site = web.TCPSite(health_runner, "0.0.0.0", port)
+    await health_site.start()
+    logger.info("Health check server started on 0.0.0.0:%s", port)
 
     try:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
-        await runner.cleanup()
+        await health_runner.cleanup()
 
 
 async def run_webhook():
