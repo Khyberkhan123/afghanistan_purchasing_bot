@@ -236,7 +236,8 @@ def main():
     args = parser.parse_args()
 
     # Default to polling if no mode specified
-    use_webhook = args.webhook or (settings.is_production and not args.polling)
+    # Webhook only if --webhook flag OR (production AND webhook_url is configured)
+    use_webhook = args.webhook or (settings.is_production and settings.webhook_url and not args.polling)
 
     try:
         if use_webhook:
