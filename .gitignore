@@ -29,6 +29,7 @@ env/
 .env
 .env.local
 .env.production
+nano.env
 
 # Database
 data/*.db
