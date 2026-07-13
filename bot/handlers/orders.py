@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 class OrderStates(StatesGroup):
     """FSM states for order creation flow."""
     waiting_for_link = State()
+    waiting_for_price = State()
     waiting_for_quantity = State()
     waiting_for_photo_inspection = State()
     waiting_for_shipping = State()
@@ -61,15 +62,13 @@ async def handle_product_link(message: Message, state: FSMContext, lang: str = "
     # Extract product info
     product = await product_extractor.extract(url)
 
-    if product["status"] == "success" and product["price_cny"]:
-        # Store in FSM state
+    if product["status"] == "success":
         await state.update_data(
             current_product=product,
             order_items=[],
             exchange_rate=await exchange_service.get_rate()
         )
 
-        # Show product details
         price_afn = round(product["price_cny"] * (await exchange_service.get_rate()), 2)
 
         product_text = get_text(
@@ -81,7 +80,6 @@ async def handle_product_link(message: Message, state: FSMContext, lang: str = "
             weight=product["weight_kg"]
         )
 
-        # If product has image, send it
         if product["image_url"]:
             try:
                 await message.answer_photo(
@@ -102,12 +100,87 @@ async def handle_product_link(message: Message, state: FSMContext, lang: str = "
             )
 
         await state.set_state(OrderStates.waiting_for_quantity)
+
+    elif product["status"] == "partial":
+        await state.update_data(
+            pending_product=product,
+            order_items=[],
+            exchange_rate=await exchange_service.get_rate()
+        )
+
+        price_afn = round((product["price_cny"] or 0) * (await exchange_service.get_rate()), 2)
+
+        product_text = get_text(
+            "product_partial", lang,
+            title=product["title"] or "Unknown Product",
+            platform=product_extractor.get_platform_display_name(product_extractor.detect_platform(url)),
+            weight=product["weight_kg"]
+        )
+
+        if product["image_url"]:
+            try:
+                await message.answer_photo(
+                    photo=product["image_url"],
+                    caption=product_text,
+                )
+                await processing_msg.delete()
+            except Exception:
+                await processing_msg.edit_text(product_text)
+        else:
+            await processing_msg.edit_text(product_text)
+
+        await state.set_state(OrderStates.waiting_for_price)
+
     else:
-        # Extraction failed - allow manual entry
         await processing_msg.edit_text(
             get_text("product_not_found", lang)
         )
         await state.set_state(OrderStates.waiting_for_link)
+
+
+@router.message(OrderStates.waiting_for_price)
+async def handle_price_input(message: Message, state: FSMContext, lang: str = "en"):
+    """Handle manual price input when extraction found title but no price."""
+    text = message.text.strip()
+    text = text.replace("¥", "").replace("CNY", "").replace("$", "").replace(",", "").strip()
+
+    try:
+        price = float(text)
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(get_text("invalid_price", lang))
+        return
+
+    data = await state.get_data()
+    product = data.get("pending_product")
+    if not product:
+        await message.answer(get_text("product_not_found", lang))
+        await state.set_state(OrderStates.waiting_for_link)
+        return
+
+    product["price_cny"] = price
+    product["status"] = "success"
+    product["original_price_cny"] = price
+
+    await state.update_data(current_product=product, pending_product=None)
+
+    price_afn = round(price * data.get("exchange_rate", await exchange_service.get_rate()), 2)
+
+    product_text = get_text(
+        "product_found", lang,
+        title=product["title"] or "Unknown Product",
+        price_cny=price,
+        price_afn=price_afn,
+        platform=product_extractor.get_platform_display_name(product_extractor.detect_platform(product["url"])),
+        weight=product["weight_kg"]
+    )
+
+    await message.answer(
+        product_text,
+        reply_markup=quantity_keyboard(lang)
+    )
+    await state.set_state(OrderStates.waiting_for_quantity)
 
 
 @router.callback_query(F.data.startswith("qty:"), OrderStates.waiting_for_quantity)
