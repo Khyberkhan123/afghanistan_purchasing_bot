@@ -1,0 +1,1 @@
+"""FA locale package."""

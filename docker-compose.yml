@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: afghanistan_purchasing_bot
+    restart: unless-stopped
+
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - BOT_USERNAME=${BOT_USERNAME}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - ENVIRONMENT=production
+      - DATABASE_URL=sqlite:///data/bot.db
+      - LOG_LEVEL=INFO
+
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+
+    ports:
+      - "8080:8080"
+
+    networks:
+      - bot-network
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Nginx reverse proxy (for SSL termination)
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: bot_nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - bot
+  #   networks:
+  #     - bot-network
+
+networks:
+  bot-network:
+    driver: bridge

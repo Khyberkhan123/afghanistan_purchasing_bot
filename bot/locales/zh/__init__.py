@@ -1,0 +1,1 @@
+"""ZH locale package."""
