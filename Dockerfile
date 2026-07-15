@@ -32,4 +32,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8080/health')" || exit 1
 
 # Run the bot
-CMD ["python", "main.py", "--webhook"]
+# Use polling mode (built-in health check server for Render port detection)
+CMD ["python", "main.py", "--polling"]
